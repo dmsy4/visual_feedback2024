@@ -1,6 +1,7 @@
 import pybullet as p
 import numpy as np
 import time
+import matplotlib.pyplot as plt
 from camera import Camera
 import cv2
 
@@ -38,7 +39,86 @@ def updateCamPos(cam):
     rotMat = p.getMatrixFromQuaternion(quat)
     rotMat = np.reshape(np.array(rotMat),(3,3))
     camera.set_new_position(xyz, rotMat)
+
+def move_eef_to_pos(
+        desired_pos,
+        mode="iterative",
+        maxNumIterations=10,
+        xy_plot=False,
+        sleep=False,
+        verbose_pos=False,
+    ):
+    """
+    Move end-effector to desired position using Inverse Kinematics.
+
+    Parameters:
+        desired_pos (list): Desired cartesian coordinates of end-effector.
+        mode (str, optional): Moving mode. Defaults to "iterative".
+            - If set to "iterative", it will re-calculate the inverse kinematics
+            after every step of the simulation, then apply new motor controls.
+            - If set to "direct", it will apply motor controls only once.
+        maxNumIterations (int, optional): Maximum number of iterations for inverse kinematics algorithm. Defaults to 10.
+        xy_plot (bool, optional): Whether to plot the movement path. Defaults to False.
+        sleep (bool, optional): Whether to add a delay between simulation steps. Defaults to False.
+        verbose_pos (bool, optional): Whether to print the current position during movement. Defaults to False.
+
+    Returns:
+        None
+    """
+    assert mode in ["iterative", "direct"]
+    xs, ys = [], []
+
+    def append_xys():
+        currentPose = p.getLinkState(boxId, eefLinkIdx)
+        x, y, _ = currentPose[0]
+        xs.append(x)
+        ys.append(y)
+
+    def print_pos():
+        currentPose = p.getLinkState(boxId, eefLinkIdx)
+        x, y, z = currentPose[0]
+        print(f"x y z = {x} {y} {z}")
+
+    append_xys() if xy_plot else None
+
+    if mode == "iterative":
+        for _ in range(100):
+            jointPoses = p.calculateInverseKinematics(boxId, eefLinkIdx, desired_pos, maxNumIterations=maxNumIterations)
+            p.setJointMotorControlArray(
+                bodyIndex=boxId,
+                jointIndices=jointIndices,
+                targetPositions=jointPoses,
+                controlMode=p.POSITION_CONTROL
+            )
+            p.stepSimulation()
+            time.sleep(0.15) if sleep else None
+            append_xys() if xy_plot else None
+            print_pos() if verbose_pos else None
+    else:
+        jointPoses = p.calculateInverseKinematics(boxId, eefLinkIdx, desired_pos, maxNumIterations=maxNumIterations)
+        p.setJointMotorControlArray(
+            bodyIndex=boxId,
+            jointIndices=jointIndices,
+            targetPositions=jointPoses,
+            controlMode=p.POSITION_CONTROL
+        )
+        for _ in range(100):
+            p.stepSimulation()
+            time.sleep(0.15) if sleep else None
+            append_xys() if xy_plot else None
+            print_pos() if verbose_pos else None
     
+    if xy_plot:
+        plt.figure()
+        plt.title(f"InverseKinematics mode: {mode}")
+        plt.plot(xs, ys, '--')
+        plt.scatter(xs[0], ys[0], marker='o', color="green", label="starting position")
+        plt.scatter(desired_pos[0], desired_pos[1], marker='o', color="red", label="desired position")
+        plt.xlabel("x")
+        plt.ylabel("y")
+        plt.grid()
+        plt.legend()
+        plt.show()
 
 camera = Camera(imgSize = [IMG_SIDE, IMG_SIDE])
 
@@ -74,7 +154,8 @@ p.setGravity(0,0,-10)
 boxId = p.loadURDF("./simple.urdf.xml", useFixedBase=True)
 
 # add aruco cube and aruco texture
-c = p.loadURDF('aruco.urdf', (0.5, 0.5, 0.0), useFixedBase=True)
+markerPos = (0.5, 0.5, 0.0)
+c = p.loadURDF('aruco.urdf', markerPos, useFixedBase=True)
 x = p.loadTexture('aruco_cube.png')
 p.changeVisualShape(c, -1, textureUniqueId=x)
 
@@ -85,9 +166,17 @@ for idx in range(numJoints):
 print(p.isNumpyEnabled())
 
 # go to the desired position
-p.setJointMotorControlArray(bodyIndex=boxId, jointIndices=jointIndices, targetPositions=[0.0, 1.5708, 0.0], controlMode=p.POSITION_CONTROL)
-for _ in range(100):
-    p.stepSimulation()
+currentPose = p.getLinkState(boxId, eefLinkIdx)
+currentPosition = currentPose[0]
+desired_pos = np.array([markerPos[0], markerPos[0], currentPosition[2]])
+move_eef_to_pos(
+    desired_pos,
+    mode="iterative",
+    maxNumIterations=100,
+    xy_plot=True,
+    sleep=False,
+    verbose_pos=True
+)
 
 updateCamPos(camera)
 img = camera.get_frame()
@@ -97,9 +186,16 @@ sd0 = np.array([(s-IMG_HALF)/IMG_HALF for s in sd0])
 sd = np.reshape(np.array(corners[0][0]),(8,1)).astype(int)
 
 # go to the starting position
-p.setJointMotorControlArray(bodyIndex=boxId, jointIndices=jointIndices, targetPositions=[0.1, 1.4708, 0.1], controlMode=p.POSITION_CONTROL)
-for _ in range(100):
-    p.stepSimulation()
+random_xy_offset = np.random.rand(2) / 50
+starting_pos = desired_pos + np.append(random_xy_offset, 0)
+move_eef_to_pos(
+    starting_pos,
+    mode="iterative",
+    maxNumIterations=100,
+    xy_plot=False,
+    sleep=True,
+    verbose_pos=True
+)
 
 idx = 1
 camCount = 0
@@ -111,7 +207,6 @@ for t in logTime[1:]:
     if (camCount == 5):
         camCount = 0
         updateCamPos(camera)
-        camera.get_frame()
         img = camera.get_frame()
         corners, markerIds, rejectedCandidates = detector.detectMarkers(img)
         s = corners[0][0,0]
@@ -142,6 +237,6 @@ for t in logTime[1:]:
     dq = (np.linalg.inv(J) @ w).flatten()[[1,0,2]]
     dq[2] = -dq[2]
     p.setJointMotorControlArray(bodyIndex=boxId, jointIndices=jointIndices, targetVelocities=dq, controlMode=p.VELOCITY_CONTROL)
-    #time.sleep(0.01)
+    # time.sleep(0.01)
     
 p.disconnect()
